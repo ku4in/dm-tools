@@ -600,8 +600,8 @@ WHERE id in (SELECT client_id from hubs WHERE hub_id=$hub_id);" | \
 		     break
 		     ;;
 	esac
-done
 	distribute_configs
+done
 }
 
 
