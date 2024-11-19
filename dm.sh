@@ -51,7 +51,7 @@ install () {
 	# apt update -y && apt upgrade -y
 	apt install -y curl net-tools iputils-ping dnsutils zip python3 python3-pip figlet qrencode
 	apt install -y sqlite3 wireguard-tools samba nftables
-	apt install -y nginx-light nginx-extras
+	apt install -y nginx-full nginx-extras
 
 	# Use PTR record for WG host
 	# It may be useful when migrate to another server
