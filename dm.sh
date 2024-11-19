@@ -69,8 +69,7 @@ install () {
 
 	wget $PUBLIC_URL/vncpwd.py -O $CONFIG_DIR/vncpwd.py
 	chmod +x $CONFIG_DIR/vncpwd.py
-	pip install --break-system-packages pyDes
-	pip install pyDes
+	pip install --break-system-packages pyDes || pip install pyDes
 
 	# Create DB
 	echo "CREATE TABLE clients (
@@ -161,18 +160,18 @@ server {
 	location / {
 		# First attempt to serve request as file, then
 		# as directory, then fall back to displaying a 404.
-		try_files $uri $uri/ =404;
+		try_files \$uri \$uri/ =404;
 	}
 
 	location /share {
 		root /var/www/;
-		secure_link $arg_md5,$arg_expires;
-		secure_link_md5 "$secure_link_expires$uri $NGINX_SECRET";
+		secure_link \$arg_md5,\$arg_expires;
+		secure_link_md5 "\$secure_link_expires\$uri \$NGINX_SECRET";
 
-		if ($secure_link = "")  { return 403; }
-		if ($secure_link = "0") { return 410; }
+		if (\$secure_link = "")  { return 403; }
+		if (\$secure_link = "0") { return 410; }
 
-		try_files $uri $uri/ =404;
+		try_files \$uri \$uri/ =404;
 	}
 }
 
@@ -187,18 +186,18 @@ server {
 	server_name _;
 
 	location / {
-		try_files $uri $uri/ =404;
+		try_files \$uri \$uri/ =404;
 	}
 
 	location /share {
 		root /var/www/;
-		secure_link $arg_md5,$arg_expires;
-		secure_link_md5 "$secure_link_expires$uri $NGINX_SECRET";
+		secure_link \$arg_md5,\$arg_expires;
+		secure_link_md5 "\$secure_link_expires\$uri \$NGINX_SECRET";
 
-		if ($secure_link = "")  { return 403; }
-		if ($secure_link = "0") { return 410; }
+		if (\$secure_link = "")  { return 403; }
+		if (\$secure_link = "0") { return 410; }
 
-		try_files $uri $uri/ =404;
+		try_files \$uri \$uri/ =404;
 	}
 }
 EOF
