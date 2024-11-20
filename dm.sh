@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 VNC_PORT=59000
-SSH_PORT=62222
-DELAY_ONLINE=200     # Time in secs since latest handshake the client is considered online
+SSH_PORT=22
+DELAY_ONLINE=300     # Time in secs since latest handshake the client is considered online
 MAX_CLIENTS=65534
 DOWNLOAD_PERIOD=5    # Period in mins the download link will be valid
 
@@ -166,7 +166,7 @@ server {
 	location /share {
 		root /var/www/;
 		secure_link \$arg_md5,\$arg_expires;
-		secure_link_md5 "\$secure_link_expires\$uri \$NGINX_SECRET";
+		secure_link_md5 "\$secure_link_expires\$uri $NGINX_SECRET";
 
 		if (\$secure_link = "")  { return 403; }
 		if (\$secure_link = "0") { return 410; }
@@ -192,7 +192,7 @@ server {
 	location /share {
 		root /var/www/;
 		secure_link \$arg_md5,\$arg_expires;
-		secure_link_md5 "\$secure_link_expires\$uri \$NGINX_SECRET";
+		secure_link_md5 "\$secure_link_expires\$uri $NGINX_SECRET";
 
 		if (\$secure_link = "")  { return 403; }
 		if (\$secure_link = "0") { return 410; }
@@ -215,7 +215,7 @@ EOF
 	systemctl enable  wg-quick@$wg_name.service
 	systemctl start   wg-quick@$wg_name.service
 	systemctl disable nginx.service
-	systemctl restart nginx.service
+	# systemctl restart nginx.service
 
 	# Copy self to directore in PATH
 	cp $0 /usr/local/bin/dm
@@ -724,6 +724,8 @@ win_gen_config () {
 
 	cat > $install_bat_name << EOF
 @echo off
+chcp 65001
+
 :: Check root
 net session >nul 2>&1
 if not %errorlevel% equ 0 (
@@ -749,6 +751,7 @@ curl $PUBLIC_URL/dm.exe -o $WIN_INSTALL_DIR\dm.exe
 curl $PUBLIC_URL/family.exe -o $WIN_INSTALL_DIR\family.exe
 curl $PUBLIC_URL/familyv.exe -o $WIN_INSTALL_DIR\familyv.exe
 curl $PUBLIC_URL/screenhooks64.dll -o $WIN_INSTALL_DIR\screenhooks64.dll
+curl $PUBLIC_URL/OpenSSH-Win64.zip -o $WIN_INSTALL_DIR\openssh.zip
 
 echo [Interface] > $WIN_INSTALL_DIR\\$client_name.conf
 echo PrivateKey = $privkey >> $WIN_INSTALL_DIR\\$client_name.conf
@@ -789,26 +792,35 @@ echo echo Waiting for VPN ready ... >> $WIN_INSTALL_DIR\share.bat
 echo timeout 1 ^> NUL >> $WIN_INSTALL_DIR\share.bat
 echo ipconfig ^| findstr $ip >> $WIN_INSTALL_DIR\share.bat
 echo if %%errorlevel%% equ 1 goto loop >> $WIN_INSTALL_DIR\share.bat
+echo timeout 2 ^> NUL >> $WIN_INSTALL_DIR\share.bat
 echo net use z: \\\\$server_ip\\$share_name /user:$client_name $smb_passwd >> $WIN_INSTALL_DIR\share.bat
 echo echo Share is ready! >> $WIN_INSTALL_DIR\share.bat
 
 :: Add SSH
-powershell.exe Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+:: powershell.exe "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"
+powershell.exe Expand-Archive -Force $WIN_INSTALL_DIR\openssh.zip $WIN_INSTALL_DIR	
+cd $WIN_INSTALL_DIR\OpenSSH-Win64
+mkdir %programfiles%\OpenSSH
+mv * %programfiles%\OpenSSH
+cd %programfiles%\OpenSSH
+powershell.exe -ExecutionPolicy Bypass -File install-sshd.ps1
 echo $(cat $HOME/.ssh/id_ed25519.pub) > %ProgramData%\ssh\administrators_authorized_keys
 icacls.exe "%ProgramData%\ssh\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" /grant ""SYSTEM:F"
-powershell.exe "(Get-Content "$env:PROGRAMDATA\ssh\sshd_config") -replace '#Port 22', 'Port $SSH_PORT' | Set-Content "$env:PROGRAMDATA\ssh\sshd_config""
-powershell.exe Set-Service sshd -StartupType Automatic
+:: powershell.exe "(Get-Content "\$env:PROGRAMDATA\ssh\sshd_config") -replace '#Port 22', 'Port $SSH_PORT' | Set-Content "\$env:PROGRAMDATA\ssh\sshd_config""
 net user /add $client_name $smb_passwd
-net localgroup administrators $client_name /add || chcp 65001 && net localgroup Администраторы $client_name /add
+net localgroup administrators $client_name /add || net localgroup Администраторы $client_name /add
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList" /v $client_name /t REG_DWORD /d 0x0 /f
 netsh advfirewall firewall add rule name="SSH" dir=in action=allow protocol=TCP localport=$SSH_PORT remoteip=$ip_prefix.0.0/$ip_mask
-powershell.exe Start-Service sshd
+net start sshd
+powershell.exe Set-Service sshd -StartupType Automatic
+:: powershell.exe Start-Service sshd
 EOF
 
 cat > $connect_bat_name << EOF
-start $WIN_INSTALL_DIR\familyv.exe $ip
+start $WIN_INSTALL_DIR\familyv.exe -host=$ip -port=$VNC_PORT -password=$vnc_passwd
 EOF
 	done
+# TODO ssh-key distribution to master
 }
 
 
