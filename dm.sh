@@ -30,6 +30,7 @@ PUBLIC_URL="https://raw.githubusercontent.com/ku4in/dm-tools/main"
 : ${allowedips:=10.10.0.0/16}
 
 
+DEF_IFACE=$(ip r | grep default | grep -o 'dev.*' | cut -f2 -d ' ')
 re_num='^[0-9]+$'
 
 # Color output functions
@@ -208,23 +209,22 @@ EOF
 	echo 1 > /proc/sys/net/ipv4/ip_forward
 	sed -i '/net.ipv4.ip_forward=1/s/#//' /etc/sysctl.conf
 
-	# TODO set up firewall
+	# Set up firewall
+	firewall_configure
 
 	# Enable and start WG and Samba, disable Nginx on boot time
-	# systemctl daemon-reload
+	systemctl daemon-reload
 	systemctl enable  wg-quick@$wg_name.service
 	systemctl start   wg-quick@$wg_name.service
+	systemctl enable  nftables.service
 	systemctl disable nginx.service
-	# systemctl restart nginx.service
+	systemctl enable  smbd.service
+	systemctl start   smbd.service
+	systemctl enable  nmbd.service
+	systemctl start   nmbd.service
 
 	# Copy self to directore in PATH
 	cp $0 /usr/local/bin/dm
-
-	# TODO enable Samba after reboot
-	# systemctl enable smb.service
-	# systemctl start  smb.service
-	# systemctl enable samba.service
-	# systemctl start  samba.service
 
 	# Info
 	echo_green "INSTALLATION COMPLETED SUCCESSFULLY!"
@@ -282,7 +282,7 @@ smb_gen_config () {
 [global]
    workgroup = WORKGROUP
    server string = %h server (Samba, Ubuntu)
-   interfaces = 127.0.0.0/8 $wg_name
+;  interfaces = 127.0.0.0/8 $wg_name
    log file = /var/log/samba/log.%m
    max log size = 1000
    logging = file
@@ -320,6 +320,53 @@ EOF
 
 EOF
 	done < <(echo "SELECT name, master FROM clients;" | sqlite3 $DB_FILE_NAME)
+}
+
+
+firewall_configure () {
+	cat > /etc/nftables.conf << EOF
+#!/usr/sbin/nft -f
+flush ruleset
+table inet filter {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iif "lo" accept
+		ct state established,related accept
+		icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, mld-listener-query, mld-listener-report, mld-listener-done, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, ind-neighbor-solicit, ind-neighbor-advert, mld2-listener-report } accept
+		icmp type { destination-unreachable, router-advertisement, router-solicitation, time-exceeded, parameter-problem } accept
+		iif $DEF_IFACE tcp dport 22 accept
+		iif $DEF_IFACE udp dport $wg_port accept
+		iif $DEF_IFACE tcp dport 80 accept
+		iif $DEF_IFACE tcp dport 443 accept
+		iifname $wg_name tcp dport 445 accept
+		iifname $wg_name udp dport 137 accept
+		iifname $wg_name udp dport 138 accept
+		iifname $wg_name tcp dport 139 accept
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+		ct state established,related accept
+EOF
+	while IFS='|' read -r id saddr is_master is_hub; do
+		if [ "$is_master" -eq 1 ]; then
+			echo -e "\t\tiifname $wg_name ip saddr $saddr accept" >> /etc/nftables.conf
+		elif [ "$is_hub" -eq 1 ]; then
+			hub_clients_ip=`echo "SELECT ip FROM clients WHERE id IN (SELECT client_id FROM hubs WHERE hub_id=$id);" | sqlite3 $DB_FILE_NAME`
+			for daddr in $hub_clients_ip; do echo -e "\t\tiifname $wg_name ip saddr $saddr ip daddr $daddr accept" >> /etc/nftables.conf; done
+		fi
+	done < <(echo "SELECT id, ip, master, hub FROM clients;" | sqlite3 $DB_FILE_NAME)
+
+	cat >> /etc/nftables.conf << EOF
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+	}
+}
+EOF
+# Apply firewall rules
+/etc/nftables.conf
 }
 
 
@@ -380,7 +427,7 @@ add_client () {
 	# Set actual ip to client
 	echo "UPDATE clients SET ip='$client_ip' WHERE id=$id;" | sqlite3 $DB_FILE_NAME
 
-	# Generate WG and Samba configs for new clients
+	# Generate WG and Samba configs for new clients and reconfigure firewall
 	wg_gen_config
 	smb_gen_config
 
@@ -393,14 +440,12 @@ add_client () {
 	win_gen_config
 
 	# Restart all
-	systemctl daemon-reload
-	systemctl restart wg-quick@$wg_name.service
-	systemctl restart smb.service
-	systemctl restart samba.service
+	restart_all
+	firewall_configure
 
 	# Info
 	echo
-	echo_green "The client \"$client_name\" has been successfully added!"
+	echo_green "The client has been successfully added!"
 }
 
 
@@ -442,9 +487,10 @@ del_client () {
 	smb_gen_config
 	distribute_configs
 	restart_all
+	firewall_configure
 
 	# Info
-	echo_green "The client \"$client_name\" has been successfully removed!"
+	echo_green "The client has been successfully removed!"
 	echo
 }
 
@@ -518,9 +564,9 @@ hub_setup () {
 	if ! [[ $hub_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
 	exists=`echo "SELECT EXISTS(SELECT * FROM clients WHERE id=$hub_id AND hub=1);" | sqlite3 $DB_FILE_NAME`
 	if [ "$exists" -eq 0 ]; then echo_red "NO SUCH HUB!"; return 1; fi
-	hub_name=`echo "SELECT name FROM clients WHERE id = $hub_id;" | sqlite3 $DB_FILE_NAME`
+	hub_name_setup=`echo "SELECT name FROM clients WHERE id = $hub_id;" | sqlite3 $DB_FILE_NAME`
 while :; do
-	echo    "Chose option for hub \"$hub_name\":"
+	echo    "Chose option for hub \"$hub_name_setup\":"
 	echo -e "S) ${RED}S${NCL}how hub clients"
 	echo -e "A) ${RED}A${NCL}dd client to hub"
 	echo -e "D) ${RED}D${NCL}elete client from hub"
@@ -530,7 +576,7 @@ while :; do
 
 	case $option in
 		s|S) #echo "SELECT name FROM clients WHERE id IN (SELECT client_id from hubs WHERE hub_id=$hub_id)" | sqlite3 $DB_FILE_NAME
-		     echo_blue "Clients of hub \"$hub_name\":"
+		     echo_blue "Clients of hub \"$hub_name_setup\":"
 		     echo -e "
 .import --csv --schema temp /tmp/wg-latest-handshakes wglh
 .import --csv --schema temp /tmp/wg-endpoints wgep
@@ -573,7 +619,7 @@ WHERE id in (SELECT client_id from hubs WHERE hub_id=$hub_id);" | \
 		     # Info
 		     client_name=`echo "SELECT name from clients where id=$client_id" | sqlite3 $DB_FILE_NAME`
 		     echo
-		     echo_green "The client \"$client_name\" has been added to hub \"$hub_name\""
+		     echo_green "The client \"$client_name\" has been added to hub \"$hub_name_setup\""
 		     echo
 		     ;;
 		d|D)
@@ -587,7 +633,7 @@ WHERE id in (SELECT client_id from hubs WHERE hub_id=$hub_id);" | \
 		     # Info
 		     client_name=`echo "SELECT name from clients where id=$client_id" | sqlite3 $DB_FILE_NAME`
 		     echo
-		     echo_green "The client \"$client_name\" has been removed from hub \"$hub_name\""
+		     echo_green "The client \"$client_name\" has been removed from hub \"$hub_name_setup\""
 		     echo
 		     ;;
 	        b|B)
@@ -600,6 +646,7 @@ WHERE id in (SELECT client_id from hubs WHERE hub_id=$hub_id);" | \
 		     ;;
 	esac
 	distribute_configs
+	firewall_configure
 done
 }
 
@@ -707,7 +754,9 @@ download_config () {
 
 
 win_gen_config () {
-	for client_name in `echo "SELECT name FROM clients;" | sqlite3 $DB_FILE_NAME`; do
+	server_ip=`echo "SELECT ip FROM server WHERE id=1;" | sqlite3 $DB_FILE_NAME`
+	#for client_name in `echo "SELECT name FROM clients;" | sqlite3 $DB_FILE_NAME`; do
+while IFS='|' read -r client_name privkey ip vnc_passwd smb_passwd is_master; do
 
 	install_bat_name=$WIN_CONF_DIR/install_$client_name.bat
 	connect_bat_name=$WIN_CONF_DIR/connect_$client_name.bat
@@ -715,16 +764,14 @@ win_gen_config () {
 	if [ -f $install_bat_name -a -f $connect_bat_name ]; then continue; fi
 
 	# Get parameters for WG and Samba configs
-	IFS='|' read -r privkey ip < <(echo "SELECT privkey, ip FROM clients WHERE name='$client_name' LIMIT 1;" | sqlite3 $DB_FILE_NAME)
-	IFS='|' read -r vnc_passwd smb_passwd is_master < <(echo "SELECT vnc_passwd, smb_passwd, master FROM clients WHERE name='$client_name' LIMIT 1;" | sqlite3 $DB_FILE_NAME)
-	server_ip=`echo "SELECT ip FROM server WHERE id=1;" | sqlite3 $DB_FILE_NAME`
+	# IFS='|' read -r privkey ip < <(echo "SELECT privkey, ip FROM clients WHERE name='$client_name' LIMIT 1;" | sqlite3 $DB_FILE_NAME)
+	# IFS='|' read -r vnc_passwd smb_passwd is_master < <(echo "SELECT vnc_passwd, smb_passwd, master FROM clients WHERE name='$client_name' LIMIT 1;" | sqlite3 $DB_FILE_NAME)
 	vnc_hash=`echo "$vnc_passwd" | $CONFIG_DIR/vncpwd.py`
 	vnc_port=`printf "0x%x\n" $VNC_PORT`
 	if [ "$is_master" -eq 1 ]; then share_name=share; else share_name=$client_name; fi
 
 	cat > $install_bat_name << EOF
 @echo off
-chcp 65001
 
 :: Check root
 net session >nul 2>&1
@@ -738,7 +785,9 @@ exit
 if exist $WIN_INSTALL_DIR\dm.exe (
     cd $WIN_INSTALL_DIR
     for %%f in (*.conf) do (
+	net use Z: /delete
         dm.exe /uninstalltunnelservice %%~nf
+	family.exe -remove -silent
         net user /delete %%~nf
         del %%f
     )
@@ -781,46 +830,60 @@ $WIN_INSTALL_DIR\family.exe -start -silent
 :: Shared folder
 reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLinkedConnections /t REG_DWORD /d 0x1 /f
 
-net use z: \\\\$server_ip\\$share_name /user:$client_name $smb_passwd
+net use Z: \\\\$server_ip\\$share_name /user:$client_name $smb_passwd
 REG ADD HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\##$server_ip#$share_name /v _LabelFromReg /t REG_SZ /d "SHARE" /f
 
-reg add "HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v "Share" /t REG_SZ /d "\"$WIN_INSTALL_DIR\share.bat\"" /f
+:: reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v "Share" /t REG_SZ /d "\"$WIN_INSTALL_DIR\share.bat\"" /f
+reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v "Share" /t REG_SZ /d "\"%systemroot%\system32\cmd.exe\" /C $WIN_INSTALL_DIR\share.bat" /f
 echo @echo off > $WIN_INSTALL_DIR\share.bat
 echo echo Try to mount Share. Please wait! >> $WIN_INSTALL_DIR\share.bat
 echo :loop >> $WIN_INSTALL_DIR\share.bat
-echo echo Waiting for VPN ready ... >> $WIN_INSTALL_DIR\share.bat
+echo echo Waiting for network ready ... >> $WIN_INSTALL_DIR\share.bat
 echo timeout 1 ^> NUL >> $WIN_INSTALL_DIR\share.bat
 echo ipconfig ^| findstr $ip >> $WIN_INSTALL_DIR\share.bat
 echo if %%errorlevel%% equ 1 goto loop >> $WIN_INSTALL_DIR\share.bat
-echo timeout 2 ^> NUL >> $WIN_INSTALL_DIR\share.bat
-echo net use z: \\\\$server_ip\\$share_name /user:$client_name $smb_passwd >> $WIN_INSTALL_DIR\share.bat
+echo timeout 1 ^> NUL >> $WIN_INSTALL_DIR\share.bat
+echo net use Z: \\\\$server_ip\\$share_name /user:$client_name $smb_passwd >> $WIN_INSTALL_DIR\share.bat
 echo echo Share is ready! >> $WIN_INSTALL_DIR\share.bat
+echo timeout 3 ^> NUL >> $WIN_INSTALL_DIR\share.bat
 
 :: Add SSH
 :: powershell.exe "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"
 powershell.exe Expand-Archive -Force $WIN_INSTALL_DIR\openssh.zip $WIN_INSTALL_DIR	
 cd $WIN_INSTALL_DIR\OpenSSH-Win64
-mkdir %programfiles%\OpenSSH
-mv * %programfiles%\OpenSSH
-cd %programfiles%\OpenSSH
+:: mkdir %programfiles%\OpenSSH
+:: move * %programfiles%\OpenSSH
+:: cd %programfiles%\OpenSSH
 powershell.exe -ExecutionPolicy Bypass -File install-sshd.ps1
 echo $(cat $HOME/.ssh/id_ed25519.pub) > %ProgramData%\ssh\administrators_authorized_keys
 icacls.exe "%ProgramData%\ssh\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" /grant ""SYSTEM:F"
 :: powershell.exe "(Get-Content "\$env:PROGRAMDATA\ssh\sshd_config") -replace '#Port 22', 'Port $SSH_PORT' | Set-Content "\$env:PROGRAMDATA\ssh\sshd_config""
 net user /add $client_name $smb_passwd
-net localgroup administrators $client_name /add || net localgroup Администраторы $client_name /add
+:: net localgroup administrators $client_name /add || net localgroup Администраторы $client_name /add
+for /f "delims= " %%i IN ('powershell "(Get-LocalGroup -SID S-1-5-32-544).Name"') DO set adm=%%i
+net localgroup %adm% $client_name /add
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList" /v $client_name /t REG_DWORD /d 0x0 /f
 netsh advfirewall firewall add rule name="SSH" dir=in action=allow protocol=TCP localport=$SSH_PORT remoteip=$ip_prefix.0.0/$ip_mask
 net start sshd
 powershell.exe Set-Service sshd -StartupType Automatic
 :: powershell.exe Start-Service sshd
 EOF
+	if [ "$is_master" -eq 1 ]; then
+		echo ":: Priv SSH key" >> $install_bat_name
+		while read -r n line; do
+			if [ "$n" -eq 1 ]; then
+				echo "echo $line > $WIN_INSTALL_DIR\id_ed25519" >> $install_bat_name
+			else
+				echo "echo $line >> $WIN_INSTALL_DIR\id_ed25519" >> $install_bat_name
+			fi
+		done < <(nl $HOME/.ssh/id_ed25519)
+	fi
 
 cat > $connect_bat_name << EOF
 start $WIN_INSTALL_DIR\familyv.exe -host=$ip -port=$VNC_PORT -password=$vnc_passwd
 EOF
-	done
-# TODO ssh-key distribution to master
+
+done < <(echo "SELECT name, privkey, ip, vnc_passwd, smb_passwd, master FROM clients;" | sqlite3 $DB_FILE_NAME)
 }
 
 
@@ -835,6 +898,7 @@ rebuild_configs () {
 	win_gen_config
 	distribute_configs
 	restart_all
+	firewall_configure
 
 	echo
 	echo_green "CONFIGS HAVE BEEN SUCCESSFULLY REBUIT!"
@@ -844,8 +908,8 @@ rebuild_configs () {
 restart_all () {
 	systemctl daemon-reload
 	systemctl restart wg-quick@$wg_name.service
-	systemctl restart smb.service
-	systemctl restart samba.service
+	systemctl restart smbd.service
+	systemctl restart nmbd.service
 }
 
 
