@@ -218,6 +218,7 @@ EOF
 	systemctl start   wg-quick@$wg_name.service
 	systemctl enable  nftables.service
 	systemctl disable nginx.service
+	systemctl stop     nginx.service
 	systemctl enable  smbd.service
 	systemctl start   smbd.service
 	systemctl enable  nmbd.service
