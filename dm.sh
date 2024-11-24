@@ -496,6 +496,17 @@ del_client () {
 }
 
 
+ssh_client () {
+	show_clients --short
+	read -p "Chose client to SSH to: " client_id
+	if ! [[ $client_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
+	exists=`echo "SELECT EXISTS(SELECT * FROM clients WHERE id=$client_id);" | sqlite3 $DB_FILE_NAME`
+	if [ "$exists" -eq 0 ]; then echo_red "NO SUCH CLIENT!"; return 1; fi
+	IFS='|' read -r client_name client_ip < <(echo "SELECT name, ip FROM clients WHERE id='$client_id' LIMIT 1;" | sqlite3 $DB_FILE_NAME)
+	ssh -o ConnectTimeout=5 $client_name@$client_ip
+}
+
+
 show_clients () {
 	is_hub=0
 	short=false
@@ -948,6 +959,7 @@ echo -e $"N) Add ${YLW}N${NCL}ew client"
 echo -e $"D) ${YLW}D${NCL}elete client"
 echo -e $"C) ${YLW}C${NCL}onfigure hub "
 echo -e $"G) ${YLW}G${NCL}et config"
+echo -e $"S) ${YLW}S${NCL}SH to client"
 echo -e $"R) ${YLW}R${NCL}ebuild configs (devel)"
 echo -e $"Q) ${YLW}Q${NCL}uit scrip"
 echo 
@@ -963,6 +975,7 @@ case $option in
 	     show_clients --endpoints       ;;
 	h|H) echo_blue "HUBS INFO:"
 	     show_clients --hubs            ;;
+        s|S) ssh_client                     ;;
         r|R) rebuild_configs                ;;
 	q|Q) break                          ;;
         *)   echo_red "Wrong choice!"
