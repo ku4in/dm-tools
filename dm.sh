@@ -49,7 +49,7 @@ echo_blue   () { echo -e ${BLE}$1${NCL}; }
 banner  () { figlet dm-script; }
 
 install () {
-	# apt update -y && apt upgrade -y
+	apt update -y && apt upgrade -y
 	apt install -y curl net-tools iputils-ping dnsutils zip python3 python3-pip figlet qrencode
 	apt install -y sqlite3 wireguard-tools samba nftables
 	apt install -y nginx-full nginx-extras
