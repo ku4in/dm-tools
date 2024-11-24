@@ -662,6 +662,7 @@ distribute_configs () {
 	# done < <(echo "select hub_id, client_id from hubs;" | sqlite3 $DB_FILE_NAME)
 	while IFS='|' read -r hub_name client_name; do
 		cp $WIN_CONF_DIR/connect_$client_name.bat $SHARE_DIR/$hub_name
+		chmod +x $SHARE_DIR/$hub_name/connect_$client_name.bat 
 	done < <(echo "SELECT hub_name.name, client_name.name FROM hubs JOIN clients AS hub_name ON hubs.hub_id = hub_name.id \
 		JOIN clients as client_name ON hubs.client_id = client_name.id;" | sqlite3 $DB_FILE_NAME)
 }
