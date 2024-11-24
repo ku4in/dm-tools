@@ -568,10 +568,10 @@ hub_setup () {
 	hub_name_setup=`echo "SELECT name FROM clients WHERE id = $hub_id;" | sqlite3 $DB_FILE_NAME`
 while :; do
 	echo    "Chose option for hub \"$hub_name_setup\":"
-	echo -e "S) ${RED}S${NCL}how hub clients"
-	echo -e "A) ${RED}A${NCL}dd client to hub"
-	echo -e "D) ${RED}D${NCL}elete client from hub"
-	echo -e "B) ${RED}B${NCL}ack"
+	echo -e "S) ${YLW}S${NCL}how hub clients"
+	echo -e "A) ${YLW}A${NCL}dd client to hub"
+	echo -e "D) ${YLW}D${NCL}elete client from hub"
+	echo -e "B) ${YLW}B${NCL}ack"
 	echo 
 	read -p "Your choice: " option
 
@@ -671,10 +671,10 @@ get_config () {
 	systemctl start nginx.service
 while :; do
 	echo    "Chose option:"
-	echo -e "O) Download ${RED}O${NCL}ne config"
-	echo -e "A) Download ${RED}A${NCL}ll configs"
-	echo -e "Q) Get ${RED}Q${NCL}R code"
-	echo -e "B) ${RED}B${NCL}ack"
+	echo -e "O) Download ${YLW}O${NCL}ne config"
+	echo -e "A) Download ${YLW}A${NCL}ll configs"
+	echo -e "Q) Get ${YLW}Q${NCL}R code"
+	echo -e "B) ${YLW}B${NCL}ack"
 	echo 
 	read -p "Your choice: " option
 
@@ -830,7 +830,7 @@ $WIN_INSTALL_DIR\family.exe -start -silent
 
 :: Shared folder
 reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v EnableLinkedConnections /t REG_DWORD /d 0x1 /f
-
+net use /PERSISTENT:NO
 net use Z: \\\\$server_ip\\$share_name /user:$client_name $smb_passwd
 REG ADD HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\##$server_ip#$share_name /v _LabelFromReg /t REG_SZ /d "SHARE" /f
 
@@ -838,15 +838,15 @@ REG ADD HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\##$
 reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v "Share" /t REG_SZ /d "\"%systemroot%\system32\cmd.exe\" /C $WIN_INSTALL_DIR\share.bat" /f
 echo @echo off > $WIN_INSTALL_DIR\share.bat
 echo echo Try to mount Share. Please wait! >> $WIN_INSTALL_DIR\share.bat
-echo :loop >> $WIN_INSTALL_DIR\share.bat
 echo echo Waiting for network ready ... >> $WIN_INSTALL_DIR\share.bat
-echo timeout 1 ^> NUL >> $WIN_INSTALL_DIR\share.bat
+echo :loop >> $WIN_INSTALL_DIR\share.bat
 echo ipconfig ^| findstr $ip >> $WIN_INSTALL_DIR\share.bat
-echo if %%errorlevel%% equ 1 goto loop >> $WIN_INSTALL_DIR\share.bat
-echo timeout 1 ^> NUL >> $WIN_INSTALL_DIR\share.bat
+echo if %%errorlevel%% equ 1 ( >> $WIN_INSTALL_DIR\share.bat
+echo timeout /t 1 /nobreak ^> NUL >> $WIN_INSTALL_DIR\share.bat
+echo goto loop >> $WIN_INSTALL_DIR\share.bat
+echo ) >> $WIN_INSTALL_DIR\share.bat
 echo net use Z: \\\\$server_ip\\$share_name /user:$client_name $smb_passwd >> $WIN_INSTALL_DIR\share.bat
 echo echo Share is ready! >> $WIN_INSTALL_DIR\share.bat
-echo timeout 3 ^> NUL >> $WIN_INSTALL_DIR\share.bat
 
 :: Add SSH
 :: powershell.exe "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"
@@ -940,15 +940,15 @@ trap "cleanup" EXIT
 while :; do
 echo 
 echo "Chose what you want:"
-echo -e $"A) Show ${RED}A${NCL}ll clients"
-echo -e $"H) Show ${RED}H${NCL}hubs"
-echo -e $"E) Show ${RED}E${NCL}ndpoints"
-echo -e $"N) Add ${RED}N${NCL}EW client"
-echo -e $"D) ${RED}D${NCL}elete client"
-echo -e $"S) Hub ${RED}S${NCL}etup"
-echo -e $"G) ${RED}G${NCL}et config"
-echo -e $"R) ${RED}R${NCL}ebuild configs (devel)"
-echo -e $"Q) ${RED}Q${NCL}uit scrip"
+echo -e $"A) Show ${YLW}A${NCL}ll clients"
+echo -e $"H) Show ${YLW}H${NCL}hubs"
+echo -e $"E) Show ${YLW}E${NCL}ndpoints"
+echo -e $"N) Add ${YLW}N${NCL}ew client"
+echo -e $"D) ${YLW}D${NCL}elete client"
+echo -e $"C) ${YLW}C${NCL}onfigure hub "
+echo -e $"G) ${YLW}G${NCL}et config"
+echo -e $"R) ${YLW}R${NCL}ebuild configs (devel)"
+echo -e $"Q) ${YLW}Q${NCL}uit scrip"
 echo 
 read -p "your choice: " option
 case $option in
@@ -957,7 +957,7 @@ case $option in
 	     show_clients                   ;; 
         d|D) del_client                     ;;
         g|G) get_config                     ;;
-        s|S) hub_setup                      ;;
+        c|C) hub_setup                      ;;
         e|E) echo_blue "ENDPOINTS INFO:"
 	     show_clients --endpoints       ;;
 	h|H) echo_blue "HUBS INFO:"
