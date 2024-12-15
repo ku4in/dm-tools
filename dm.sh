@@ -2,9 +2,9 @@
 
 VNC_PORT=59000
 SSH_PORT=22
-DELAY_ONLINE=300     # Time in secs since latest handshake the client is considered online
+DELAY_ONLINE=300            # Time in secs since latest handshake the client is considered online
 MAX_CLIENTS=65534
-DOWNLOAD_PERIOD=5    # Period in mins the download link will be valid
+DOWNLOAD_PERIOD="10 days"   # Period the download link will be valid
 
 CONFIG_DIR=/etc/dm
 WG_CONF_DIR=$CONFIG_DIR/wg
@@ -53,6 +53,11 @@ install () {
 	apt install -y curl net-tools iputils-ping dnsutils zip python3 python3-pip figlet qrencode
 	apt install -y sqlite3 wireguard-tools samba nftables
 	apt install -y nginx-full nginx-extras
+	apt install -y python3-flask libev-dev
+
+	pip install --break-system-packages pyDes  || pip install pyDes
+	pip install --break-system-packages bjoern || pip install bjoern
+	pip install --break-system-packages python-dotenv || pip install python-dotenv
 
 	# Use PTR record for WG host
 	# It may be useful when migrate to another server
@@ -70,40 +75,105 @@ install () {
 
 	wget $PUBLIC_URL/vncpwd.py -O $CONFIG_DIR/vncpwd.py
 	chmod +x $CONFIG_DIR/vncpwd.py
-	pip install --break-system-packages pyDes || pip install pyDes
+
+	# Install and configure Clicker HUB server
+	wget $PUBLIC_URL/clicker_hub.zip -O $CONFIG_DIR/clicker_hub.zip
+	unzip $CONFIG_DIR/clicker_hub.zip -d $CONFIG_DIR
+	rm -f $CONFIG_DIR/clicker_hub.zip
+	chmod +x $CONFIG_DIR/clicker_hub/app.py
+	
+	cat > /etc/systemd/system/clicker_hub.service << EOF
+[Unit]
+Description=Clicker HUB server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$CONFIG_DIR/clicker_hub/
+ExecStart=$CONFIG_DIR/clicker_hub/app.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo TG_TOKEN=$TG_TOKEN > $CONFIG_DIR/clicker_hub/.env
+echo CHAT_ID=$CHAT_ID  >> $CONFIG_DIR/clicker_hub/.env
 
 	# Create DB
-	echo "CREATE TABLE clients (
-	id         INTEGER     PRIMARY KEY AUTOINCREMENT,
-	name       VARCHAR(32) NOT NULL,
-	ip         VARCHAR(16) NOT NULL,
-	privkey    VARCHAR(48) NOT NULL,
-	pubkey     VARCHAR(48) NOT NULL,
-	smb_passwd VARCHAR(12) NOT NULL,
-	vnc_passwd VARCHAR(8)  NOT NULL,
-	master     INTEGER     DEFAULT 0,
-	hub        INTEGER     DEFAULT 0,
-	date       TEXT        DEFAULT CURRENT_TIMESTAMP,
-	comment    TEXT);" | sqlite3 $DB_FILE_NAME
+	echo "CREATE TABLE IF NOT EXISTS clients (
+	id          INTEGER     PRIMARY KEY AUTOINCREMENT,
+	name        VARCHAR(32) NOT NULL,
+	ip          VARCHAR(16) NOT NULL,
+	privkey     VARCHAR(48) NOT NULL,
+	pubkey      VARCHAR(48) NOT NULL,
+	smb_passwd  VARCHAR(12) NOT NULL,
+	vnc_passwd  VARCHAR(8)  NOT NULL,
+	master      INTEGER     DEFAULT 0,
+	hub         INTEGER     DEFAULT 0,
+	date        TEXT        DEFAULT CURRENT_TIMESTAMP,
+	comment     TEXT);"   | sqlite3 $DB_FILE_NAME
 
-	echo "CREATE TABLE server (
-	id         INTEGER     PRIMARY KEY AUTOINCREMENT,
-	hostname   TEXT,
-	ip         VARCHAR(16) NOT NULL,
-	privkey    VARCHAR(48) NOT NULL,
-	pubkey     VARCHAR(48) NOT NULL);" | sqlite3 $DB_FILE_NAME
+	echo "CREATE TABLE IF NOT EXISTS server (
+	id          INTEGER     PRIMARY KEY AUTOINCREMENT,
+	hostname    TEXT,
+	ip          VARCHAR(16) NOT NULL,
+	privkey     VARCHAR(48) NOT NULL,
+	pubkey      VARCHAR(48) NOT NULL);" | sqlite3 $DB_FILE_NAME
 
 	echo "CREATE TABLE hubs (
-	hub_id     INTEGER,
-	client_id  INTEGER);" | sqlite3 $DB_FILE_NAME
+	hub_id      INTEGER,
+	client_id   INTEGER,
+	PRIMARY KEY (hub_id, client_id),
+	FOREIGN KEY (hub_id)    REFERENCES  clients (id) ON DELETE CASCADE,
+	FOREIGN KEY (client_id) REFERENCES  clients (id) ON DELETE CASCADE);" | sqlite3 $DB_FILE_NAME
+
+	echo "CREATE TABLE IF NOT EXISTS books (
+	id          INTEGER     PRIMARY KEY AUTOINCREMENT,
+	name        VARCHAR(64) NOT NULL);" | sqlite3 $DB_FILE_NAME
+
+	echo "CREATE TABLE IF NOT EXISTS client_books (
+	client_id   INTEGER,
+	book_id     INTEGER,
+	init_amount INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (client_id, book_id),
+	FOREIGN KEY (client_id) REFERENCES  clients (id) ON DELETE CASCADE,
+	FOREIGN KEY (book_id)   REFERENCES  books   (id) ON DELETE CASCADE);" | sqlite3 $DB_FILE_NAME
+
+	echo "CREATE TABLE IF NOT EXISTS submissions (
+	hub_id      INTEGER,
+	client_id   INTEGER,
+	book_id     INTEGER,
+	amount      INTEGER NOT NULL DEFAULT 0,
+	note        TEXT,
+	date        TEXT DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (hub_id, client_id, book_id),
+	FOREIGN KEY (hub_id)    REFERENCES  clients (id) ON DELETE CASCADE,
+	FOREIGN KEY (client_id) REFERENCES  clients (id) ON DELETE CASCADE,
+	FOREIGN KEY (book_id)   REFERENCES  books   (id) ON DELETE CASCADE);" | sqlite3 $DB_FILE_NAME
 
 	# Fill server table
 	: ${wg_privkey:=`wg genkey`}
 	wg_pubkey=`wg pubkey <<< $wg_privkey`
 	echo "INSERT INTO server (hostname, ip, privkey, pubkey) VALUES ('$wg_host', '$ip_prefix.$server_ip', '$wg_privkey', '$wg_pubkey');" | sqlite3 $DB_FILE_NAME
 
-	# Generate configs for WG and SMB servers
-	wg_gen_config
+	# Fill books table with default books
+	echo "INSERT INTO books (name) VALUES ('BetMGM'),
+                                              ('Fanduel'),
+                                              ('Draftkings'),
+                                              ('ESPN'),
+					      ('BetRivers'),
+					      ('BET365'),
+					      ('Ceasars'),
+					      ('Fanatics'),
+					      ('Fliff'),
+					      ('Rebet'),
+					      ('Stake'),
+					      ('Hardrock');" | sqlite3 $DB_FILE_NAME
+                                              
+                                              	# Generate configs for WG and SMB servers
+                                              	wg_gen_config
 	smb_gen_config
 
 	# Set up Nginx
@@ -150,31 +220,31 @@ add_header X-Content-Type-Options nosniff;
 add_header X-XSS-Protection "1; mode=block";
 EOF
 	cat > $NGINX_CONF_FILE << EOF
-server {
-	listen 80 default_server;
-	listen [::]:80 default_server;
-
-	root /var/www/html;
-	index index.html index.htm index.nginx-debian.html;
-	server_name _;
-
-	location / {
-		# First attempt to serve request as file, then
-		# as directory, then fall back to displaying a 404.
-		try_files \$uri \$uri/ =404;
-	}
-
-	location /share {
-		root /var/www/;
-		secure_link \$arg_md5,\$arg_expires;
-		secure_link_md5 "\$secure_link_expires\$uri $NGINX_SECRET";
-
-		if (\$secure_link = "")  { return 403; }
-		if (\$secure_link = "0") { return 410; }
-
-		try_files \$uri \$uri/ =404;
-	}
-}
+# server {
+# 	listen 80 default_server;
+# 	listen [::]:80 default_server;
+# 
+# 	root /var/www/html;
+# 	index index.html index.htm index.nginx-debian.html;
+# 	server_name _;
+# 
+# 	location / {
+# 		# First attempt to serve request as file, then
+# 		# as directory, then fall back to displaying a 404.
+# 		try_files \$uri \$uri/ =404;
+# 	}
+# 
+# 	location /share {
+# 		root /var/www/;
+# 		secure_link \$arg_md5,\$arg_expires;
+# 		secure_link_md5 "\$secure_link_expires\$uri $NGINX_SECRET";
+# 
+# 		if (\$secure_link = "")  { return 403; }
+# 		if (\$secure_link = "0") { return 410; }
+# 
+# 		try_files \$uri \$uri/ =404;
+# 	}
+# }
 
 server {
 	listen 443 ssl;
@@ -217,12 +287,15 @@ EOF
 	systemctl enable  wg-quick@$wg_name.service
 	systemctl start   wg-quick@$wg_name.service
 	systemctl enable  nftables.service
-	systemctl disable nginx.service
-	systemctl stop     nginx.service
+	systemctl enable  nginx.service
+	systemctl restart nginx.service
 	systemctl enable  smbd.service
 	systemctl start   smbd.service
 	systemctl enable  nmbd.service
 	systemctl start   nmbd.service
+
+	systemctl start clicker_hub.service
+	systemctl enable clicker_hub.service
 
 	# Copy self to directore in PATH
 	cp $0 /usr/local/bin/dm
@@ -337,8 +410,9 @@ table inet filter {
 		icmp type { destination-unreachable, router-advertisement, router-solicitation, time-exceeded, parameter-problem } accept
 		iif $DEF_IFACE tcp dport 22 accept
 		iif $DEF_IFACE udp dport $wg_port accept
-		iif $DEF_IFACE tcp dport 80 accept
+		# iif $DEF_IFACE tcp dport 80 accept
 		iif $DEF_IFACE tcp dport 443 accept
+		iifname $wg_name tcp dport 80 accept
 		iifname $wg_name tcp dport 445 accept
 		iifname $wg_name udp dport 137 accept
 		iifname $wg_name udp dport 138 accept
@@ -474,8 +548,10 @@ del_client () {
 	exists=`echo "SELECT EXISTS(SELECT * FROM clients WHERE id=$client_id);" | sqlite3 $DB_FILE_NAME`
 	if [ "$exists" -eq 0 ]; then echo_red "NO SUCH CLIENT!"; return 1; fi
 	client_name=`echo "SELECT name FROM clients WHERE id = $client_id;" | sqlite3 $DB_FILE_NAME`
-	echo "DELETE FROM clients WHERE id = $client_id;" | sqlite3 $DB_FILE_NAME
-	echo "DELETE FROM hubs WHERE hub_id=$client_id;"  | sqlite3 $DB_FILE_NAME
+	echo "PRAGMA foreign_keys = ON; DELETE FROM clients WHERE id = $client_id;" | sqlite3 $DB_FILE_NAME
+	# echo "DELETE FROM hubs WHERE hub_id=$client_id;"  | sqlite3 $DB_FILE_NAME
+	# TODO delete by client_id also!
+
 	deluser --quiet $client_name 1>/dev/null 2>&1
 	rm -rf $WG_CONF_DIR/$client_name.conf
 	# Delete Windows configs
@@ -527,23 +603,7 @@ show_clients () {
 		echo
 		return 0
 	fi
-	# Check online and offline clients
-	cur_time=`date +%s`
-	time_to_be_online=$((cur_time - $DELAY_ONLINE))
-
-	# WG latest handshakes table
-	echo pubkey,status > /tmp/wg-latest-handshakes
-	while read pk lh;
-		do (( lh > time_to_be_online )) && status=ONLINE || status=OFFLINE
-		echo $pk,$status >> /tmp/wg-latest-handshakes
-	done < <(wg show $wg_name latest-handshakes)
-
-	# WG endpoints table
-	echo pubkey,ep > /tmp/wg-endpoints
-	while read pk ep;
-		do ep=`echo $ep | cut -f1 -d ':'`
-		echo $pk,$ep >> /tmp/wg-endpoints
-	done < <(wg show $wg_name endpoints)
+	wg_temp_tables
 
 	# Print joined table with clients info
 	echo -e "
@@ -568,6 +628,27 @@ FROM clients LEFT JOIN wglh ON clients.pubkey = wglh.pubkey LEFT JOIN wgep ON cl
 }
 
 
+wg_temp_tables () {
+	# Check online and offline clients
+	cur_time=`date +%s`
+	time_to_be_online=$((cur_time - $DELAY_ONLINE))
+
+	# WG latest handshakes table
+	echo pubkey,status > /tmp/wg-latest-handshakes
+	while read pk lh;
+		do (( lh > time_to_be_online )) && status=ONLINE || status=OFFLINE
+		echo $pk,$status >> /tmp/wg-latest-handshakes
+	done < <(wg show $wg_name latest-handshakes)
+
+	# WG endpoints table
+	echo pubkey,ep > /tmp/wg-endpoints
+	while read pk ep;
+		do ep=`echo $ep | cut -f1 -d ':'`
+		echo $pk,$ep >> /tmp/wg-endpoints
+	done < <(wg show $wg_name endpoints)
+}
+
+
 hub_setup () {
 	echo_blue "All hubs:"
 	show_clients --hubs --short
@@ -588,6 +669,7 @@ while :; do
 
 	case $option in
 		s|S) #echo "SELECT name FROM clients WHERE id IN (SELECT client_id from hubs WHERE hub_id=$hub_id)" | sqlite3 $DB_FILE_NAME
+		     wg_temp_tables
 		     echo_blue "Clients of hub \"$hub_name_setup\":"
 		     echo -e "
 .import --csv --schema temp /tmp/wg-latest-handshakes wglh
@@ -663,14 +745,123 @@ done
 }
 
 
+books_setup () {
+while :; do
+	# TODO Show cliet books
+	# TODO Delete book from client
+	echo
+	echo    "Chose option:"
+	echo -e "N) Add ${YLW}N${NCL}ew book"
+	echo -e "D) ${YLW}D${NCL}elete book"
+	echo -e "A) Show ${YLW}A${NCL}ll books"
+	echo -e "C) Add book to ${YLW}C${NCL}lient"
+	echo -e "R) ${YLW}R${NCL}emove book from Client"
+	echo -e "S) ${YLW}S${NCL}how client books"
+	echo -e "B) ${YLW}B${NCL}ack"
+	echo 
+	read -p "Your choice: " option
+
+	case $option in
+		n|N)
+		     read -p "Book name: " book_name 
+		     echo "INSERT INTO books (name) values ('$book_name');" | sqlite3 $DB_FILE_NAME
+
+		;;
+		a|A)
+		     show_all_books
+		     ;;
+	        c|C)
+		     select_client
+		     if [ "$?" -ne 0 ]; then return; fi
+		     # show_clients --short --endpoints
+		     # read -p "Select client: " client_id
+		     # if ! [[ $client_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
+		     # exists=`echo "SELECT EXISTS(SELECT * FROM clients WHERE id=$client_id AND hub=0);" | sqlite3 $DB_FILE_NAME`
+		     # if [ "$exists" -eq 0 ]; then echo_red "NO SUCH ENDPOINT!"; return 1; fi
+		     # client_name=`echo "SELECT name FROM clients WHERE id=$client_id" | sqlite3 $DB_FILE_NAME`
+		     echo
+		     echo_blue "All books:"
+		     echo -e ".separator ') ' \nSELECT id, name FROM books;" | sqlite3 $DB_FILE_NAME
+		     echo
+		     echo "Input book names and initial amounts for the client \"$client_name\". You can add multiple at once by separating them with a comma."
+		     IFS=',' read -a books -p "Input book IDs: "
+		     IFS=',' read -a init_amounts -p "Input initial amounts: "
+		     len_b=${#books[@]}
+		     len_a=${#init_amounts[@]}
+		     min=$(( len_b > len_a ? len_a : len_b ))
+		     N=$((min - 1))
+		     echo "INSERT OR REPLACE INTO client_books VALUES $(for i in $(seq 0 $N ); do echo -n \($client_id, ${books[$i]}, ${init_amounts[$i]}\);
+		                                                        if [ "$i" -ne "$N" ]; then echo ,; fi; done);" | sqlite3 $DB_FILE_NAME
+		     ;;
+
+	        d|D)
+		     show_all_books
+		     echo
+		     read -p "Chose book to delete: " book_id
+		     if ! [[ $book_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
+		     exists=`echo "SELECT EXISTS (SELECT * FROM books WHERE id=$book_id);" | sqlite3 $DB_FILE_NAME`
+		     if [ "$exists" -eq 0 ]; then echo_red "NO SUCH BOOK!"; return 1; fi
+		     echo "DELETE FROM books WHERE id=$book_id;" | sqlite3 $DB_FILE_NAME
+		     ;;
+
+		s|S)
+		     select_client
+		     if [ "$?" -ne 0 ]; then return; fi
+		     show_client_books
+		     ;;
+	        r|R)
+		     select_client
+		     if [ "$?" -ne 0 ]; then return; fi
+		     show_client_books_short
+		     echo
+		     read -p "Chose book to delete: " book_id
+		     if ! [[ $book_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
+		     exists=`echo "SELECT EXISTS (SELECT * FROM books WHERE id=$book_id);" | sqlite3 $DB_FILE_NAME`
+		     if [ "$exists" -eq 0 ]; then echo_red "NO SUCH BOOK!"; return 1; fi
+		     echo "DELETE FROM client_books WHERE client_id=$client_id AND book_id=$book_id;" | sqlite3 $DB_FILE_NAME
+		     ;;
+	        b|B)
+		     echo_blue Back
+		     break
+		     ;;
+		*)
+		     echo_red "Wrong choice!"
+		     break
+		     ;;
+	esac
+done
+}
+
+select_client () {
+	     show_clients --short --endpoints
+	     read -p "Select client: " client_id
+	     if ! [[ $client_id =~ $re_num ]]; then echo_red "Wrong input!"; return 1; fi
+	     exists=`echo "SELECT EXISTS(SELECT * FROM clients WHERE id=$client_id AND hub=0);" | sqlite3 $DB_FILE_NAME`
+	     if [ "$exists" -eq 0 ]; then echo_red "NO SUCH ENDPOINT!"; return 1; fi
+	     client_name=`echo "SELECT name FROM clients WHERE id=$client_id" | sqlite3 $DB_FILE_NAME`
+}
+
+show_all_books () {
+	     echo
+	     echo_blue "All books:"
+	     echo -e ".separator ') ' \nSELECT id, name FROM books;" | sqlite3 $DB_FILE_NAME
+}
+
+show_client_books () {
+	     echo_blue "Books of \"$client_name\":"
+	     echo -e ".mode table
+	     SELECT name, init_amount FROM client_books JOIN books ON client_books.book_id = books.id WHERE client_id = $client_id;" | sqlite3 $DB_FILE_NAME
+}
+
+show_client_books_short () {
+	     echo_blue "Books of \"$client_name\":"
+	     echo -e ".separator ') ' \nSELECT id, name FROM client_books JOIN books ON client_books.book_id = books.id WHERE client_id = $client_id;" | sqlite3 $DB_FILE_NAME
+}
+
+
 distribute_configs () {
 	# Delete all .bat files from share dirs
 	rm -rf $SHARE_DIR/**/*.bat
-	# while IFS='|' read -r hub_id client_id; do
-	# 	hub_name=`   echo "SELECT name FROM clients WHERE id = $hub_id;"    | sqlite3 $DB_FILE_NAME`
-	# 	client_name=`echo "SELECT name FROM clients WHERE id = $client_id;" | sqlite3 $DB_FILE_NAME`
-	# 	cp $WIN_CONF_DIR/connect_$client_name.bat $SHARE_DIR/$hub_name
-	# done < <(echo "select hub_id, client_id from hubs;" | sqlite3 $DB_FILE_NAME)
 	while IFS='|' read -r hub_name client_name; do
 		cp $WIN_CONF_DIR/connect_$client_name.bat $SHARE_DIR/$hub_name
 		chmod +x $SHARE_DIR/$hub_name/connect_$client_name.bat 
@@ -733,7 +924,7 @@ download_config () {
 	hostname=`dig +short -x $pub_ip`
 	if [ "${#hostname}" = "0" ]; then hostname=$pub_ip; else hostname=${hostname:0:-1}; fi 
 
-	echo "Links will be valid for $DOWNLOAD_PERIOD minutes!"
+	echo "Links will be valid for $DOWNLOAD_PERIOD!"
 	client_name=$1
 	if [ -z "$client_name" ]; then
 		cd $WIN_CONF_DIR
@@ -741,7 +932,7 @@ download_config () {
 		cd $WG_CONF_DIR
 		zip -q -g $WIN_CONF_DIR/all_clients.zip *
 		mv $WIN_CONF_DIR/all_clients.zip $NGINX_SHARE
-		expires=`date +%s --date="today + $DOWNLOAD_PERIOD min"`
+		expires=`date +%s --date="today + $DOWNLOAD_PERIOD"`
 		md5=`echo -n "$expires/share/all_clients.zip $NGINX_SECRET" | openssl md5 -binary | openssl base64 | tr +/ -_ | tr -d =`
 		link="https://$hostname/share/all_clients.zip?md5=$md5&expires=$expires"
 		echo $link
@@ -751,7 +942,7 @@ download_config () {
 		cp $WIN_CONF_DIR/connect_$client_name.bat $NGINX_SHARE
 		cp $WG_CONF_DIR/$client_name.conf         $NGINX_SHARE
 
-		expires=`date +%s --date="today + $DOWNLOAD_PERIOD min"`
+		expires=`date +%s --date="today + $DOWNLOAD_PERIOD"`
 		md5_install=`echo -n "$expires/share/install_$client_name.bat $NGINX_SECRET" | openssl md5 -binary | openssl base64 | tr +/ -_ | tr -d =`
 		md5_connect=`echo -n "$expires/share/connect_$client_name.bat $NGINX_SECRET" | openssl md5 -binary | openssl base64 | tr +/ -_ | tr -d =`
 		md5_config=` echo -n "$expires/share/$client_name.conf $NGINX_SECRET"        | openssl md5 -binary | openssl base64 | tr +/ -_ | tr -d =`
@@ -782,6 +973,9 @@ while IFS='|' read -r client_name privkey ip vnc_passwd smb_passwd is_master; do
 	vnc_hash=`echo "$vnc_passwd" | $CONFIG_DIR/vncpwd.py`
 	vnc_port=`printf "0x%x\n" $VNC_PORT`
 	if [ "$is_master" -eq 1 ]; then share_name=share; else share_name=$client_name; fi
+
+	# Get WG ip address of server for hosts
+	wg_ip=`echo "SELECT ip FROM server WHERE id = 1;" | sqlite3 $DB_FILE_NAME`
 
 	cat > $install_bat_name << EOF
 @echo off
@@ -831,11 +1025,11 @@ $WIN_INSTALL_DIR\family.exe -install -silent
 netsh advfirewall firewall add rule name="FAMILY" dir=in action=allow protocol=TCP localport=59000 remoteip=$ip_prefix.0.0/$ip_mask
 
 :: Change password
-reg add "HKLM\SOFTWARE\TightVNC\Server" /v Password /t REG_BINARY /d $vnc_hash /f
-reg add "HKLM\SOFTWARE\TightVNC\Server" /v UseVncAuthentication /t REG_DWORD /d 0x1 /f
-reg add "HKLM\SOFTWARE\TightVNC\Server" /v RunControlInterface /t REG_DWORD /d 0x0 /f
-reg add "HKLM\SOFTWARE\TightVNC\Server" /v RemoveWallpaper /t REG_DWORD /d 0x0 /f
-reg add "HKLM\SOFTWARE\TightVNC\Server" /v RfbPort /t REG_DWORD /d $vnc_port /f
+reg add "HKLM\SOFTWARE\Family\Server" /v Password /t REG_BINARY /d $vnc_hash /f
+reg add "HKLM\SOFTWARE\Family\Server" /v UseVncAuthentication /t REG_DWORD /d 0x1 /f
+reg add "HKLM\SOFTWARE\Family\Server" /v RunControlInterface /t REG_DWORD /d 0x0 /f
+reg add "HKLM\SOFTWARE\Family\Server" /v RemoveWallpaper /t REG_DWORD /d 0x0 /f
+reg add "HKLM\SOFTWARE\Family\Server" /v RfbPort /t REG_DWORD /d $vnc_port /f
 timeout 2 > NUL
 
 $WIN_INSTALL_DIR\family.exe -start -silent
@@ -861,25 +1055,35 @@ echo net use Z: \\\\$server_ip\\$share_name /user:$client_name $smb_passwd >> $W
 echo echo Share is ready! >> $WIN_INSTALL_DIR\share.bat
 
 :: Add SSH
-:: powershell.exe "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"
-powershell.exe Expand-Archive -Force $WIN_INSTALL_DIR\openssh.zip $WIN_INSTALL_DIR	
+powershell.exe Expand-Archive -Force $WIN_INSTALL_DIR\openssh.zip $WIN_INSTALL_DIR
 cd $WIN_INSTALL_DIR\OpenSSH-Win64
-:: mkdir %programfiles%\OpenSSH
-:: move * %programfiles%\OpenSSH
-:: cd %programfiles%\OpenSSH
 powershell.exe -ExecutionPolicy Bypass -File install-sshd.ps1
 echo $(cat $HOME/.ssh/id_ed25519.pub) > %ProgramData%\ssh\administrators_authorized_keys
 icacls.exe "%ProgramData%\ssh\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" /grant ""SYSTEM:F"
-:: powershell.exe "(Get-Content "\$env:PROGRAMDATA\ssh\sshd_config") -replace '#Port 22', 'Port $SSH_PORT' | Set-Content "\$env:PROGRAMDATA\ssh\sshd_config""
 net user /add $client_name $smb_passwd
-:: net localgroup administrators $client_name /add || net localgroup Администраторы $client_name /add
 for /f "delims= " %%i IN ('powershell "(Get-LocalGroup -SID S-1-5-32-544).Name"') DO set adm=%%i
 net localgroup %adm% $client_name /add
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList" /v $client_name /t REG_DWORD /d 0x0 /f
 netsh advfirewall firewall add rule name="SSH" dir=in action=allow protocol=TCP localport=$SSH_PORT remoteip=$ip_prefix.0.0/$ip_mask
 net start sshd
 powershell.exe Set-Service sshd -StartupType Automatic
-:: powershell.exe Start-Service sshd
+
+:: Add server name to hosts
+echo $wg_ip clicker.hub >> %systemroot%\System32\Drivers\etc\hosts
+
+:: Exclusions for Microsoft Defender
+powershell -inputformat none -outputformat none -NonInteractive -Command Add-MpPreference -ExclusionPath "$WIN_INSTALL_DIR"
+
+:: Change Windows Power Settings
+:: Settings when plugged in to external power
+Powercfg /Change standby-timeout-ac 0
+Powercfg /Change hibernate-timeout-ac 0
+Powercfg /Change monitor-timeout-ac 20
+
+:: Settings when running on battery power
+Powercfg /Change standby-timeout-dc 60
+Powercfg /Change hibernate-timeout-dc 0
+Powercfg /Change monitor-timeout-dc 10
 EOF
 	if [ "$is_master" -eq 1 ]; then
 		echo ":: Priv SSH key" >> $install_bat_name
@@ -892,6 +1096,7 @@ EOF
 		done < <(nl $HOME/.ssh/id_ed25519)
 	fi
 
+# Create connect.bat file in shared folder
 cat > $connect_bat_name << EOF
 start $WIN_INSTALL_DIR\familyv.exe -host=$ip -port=$VNC_PORT -password=$vnc_passwd
 EOF
@@ -930,8 +1135,8 @@ cleanup () {
 	echo
 	echo_green "GOODBYE!"
 	echo
-	systemctl stop nginx.service
-	rm -f $NGINX_SHARE/*
+	# systemctl stop nginx.service
+	# rm -f $NGINX_SHARE/*
 }
 
 #############
@@ -957,7 +1162,8 @@ echo -e $"H) Show ${YLW}H${NCL}hubs"
 echo -e $"E) Show ${YLW}E${NCL}ndpoints"
 echo -e $"N) Add ${YLW}N${NCL}ew client"
 echo -e $"D) ${YLW}D${NCL}elete client"
-echo -e $"C) ${YLW}C${NCL}onfigure hub "
+echo -e $"C) ${YLW}C${NCL}onfigure hub"
+echo -e $"B) Configure ${YLW}B${NCL}ooks"
 echo -e $"G) ${YLW}G${NCL}et config"
 echo -e $"S) ${YLW}S${NCL}SH to client"
 echo -e $"R) ${YLW}R${NCL}ebuild configs (devel)"
@@ -971,6 +1177,7 @@ case $option in
         d|D) del_client                     ;;
         g|G) get_config                     ;;
         c|C) hub_setup                      ;;
+	b|B) books_setup                    ;;
         e|E) echo_blue "ENDPOINTS INFO:"
 	     show_clients --endpoints       ;;
 	h|H) echo_blue "HUBS INFO:"
