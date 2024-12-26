@@ -15,6 +15,7 @@ $doc = New-RoyalDocument -Store $store -Name "Storage" -FileName "Clients.rtsz"
 $dynfold = New-RoyalObject -folder $doc -Type RoyalDynamicFolder -Name "All clients"
 $dynfold.ScriptInterpreter = "powershell"
 $dynfold.ScriptContent = '$resp = Invoke-WebRequest "http://10.10.255.254/api/v1/royal/json"; Write-Output $resp.ToString()'
+$dynfold.AutoReloadContents = "True"
 $o = Get-RoyalObject -Folder $doc -Name "Connections"
 Remove-RoyalObject -Object $o -Force
 $o = Get-RoyalObject -Folder $doc -Name "Credentials"
