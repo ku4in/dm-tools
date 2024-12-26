@@ -11,8 +11,8 @@ Install-Module RoyalDocument.PowerShell -Force
 
 Import-Module RoyalDocument.PowerShell
 $store = New-RoyalStore -UserName "username"
-$doc = New-RoyalDocument -Store $store -Name "ClickerHUB" -FileName "Clicker.rtsz"
-$dynfold = New-RoyalObject -folder $doc -Type RoyalDynamicFolder -Name "Clicker HUB"
+$doc = New-RoyalDocument -Store $store -Name "Storage" -FileName "Clients.rtsz"
+$dynfold = New-RoyalObject -folder $doc -Type RoyalDynamicFolder -Name "All clients"
 $dynfold.ScriptInterpreter = "powershell"
 $dynfold.ScriptContent = '$resp = Invoke-WebRequest "http://10.10.255.254/api/v1/royal/json"; Write-Output $resp.ToString()'
 $o = Get-RoyalObject -Folder $doc -Name "Connections"
@@ -21,4 +21,4 @@ $o = Get-RoyalObject -Folder $doc -Name "Credentials"
 Remove-RoyalObject -Object $o -Force
 $o = Get-RoyalObject -Folder $doc -Name "Tasks"
 Remove-RoyalObject -Object $o -Force
-Out-RoyalDocument -FileName "Clicker.rtsz" -Document $doc
+Out-RoyalDocument -FileName "Clients.rtsz" -Document $doc
